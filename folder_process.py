@@ -20,14 +20,19 @@ class EnhancedCustomerCounter:
         self.initial_positions = {}
         self.counted_ids = set()
         self.total_count = 0
+        self.invalid_ids = set()  # Geçersiz ID'leri tutmak için set
         
-        self.colors = {'counted': (0, 255, 0), 'uncounted': (0, 0, 255)}
+        self.colors = {
+            'counted': (0, 255, 0),     # Yeşil
+            'uncounted': (0, 0, 255),   # Kırmızı 
+            'invalid': (255, 0, 255)    # Mor
+        }
         self.frame_size = 640
         self.detection_roi = None
         self.entry_line = None
 
     def select_roi_interactively(self, frame):
-        """ROI seçimi her durumda etkin"""
+        """ROI seçimi"""
         roi = cv2.selectROI("ALGILAMA ALANI SEC (Her durumda aktif)", frame, showCrosshair=True)
         cv2.destroyAllWindows()
         
@@ -44,9 +49,19 @@ class EnhancedCustomerCounter:
                 self.detection_roi['y'] <= y <= self.detection_roi['y'] + self.detection_roi['h'])
 
     def has_valid_crossing(self, track_id):
-        if track_id not in self.initial_positions or len(self.track_history[track_id]) < 2:
+        # Eğer ID geçersiz olarak işaretlenmişse direkt False dön
+        if track_id in self.invalid_ids:
             return False
             
+        if track_id not in self.initial_positions or len(self.track_history[track_id]) < 2:
+            return False
+
+        # İlk pozisyon kontrolü
+        initial_y = self.initial_positions[track_id]
+        if initial_y > self.entry_line:
+            self.invalid_ids.add(track_id)  # Geçersiz ID'yi kaydet
+            return False
+
         prev_y = self.track_history[track_id][-2][1]
         current_y = self.track_history[track_id][-1][1]
         return prev_y <= self.entry_line and current_y > self.entry_line
@@ -64,19 +79,19 @@ class EnhancedCustomerCounter:
                 int(cap.get(cv2.CAP_PROP_FPS) // self.frame_skip),
                 (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
                  int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
-            )  # Parantez düzeltildi
+            )  
         
         video_count = 0
         self.track_history.clear()
         self.initial_positions.clear()
         self.counted_ids.clear()
+        self.invalid_ids.clear()  # Invalid ID'leri temizle
 
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) // self.frame_skip)
-        with tqdm(total=total_frames,  # Parantez düzeltildi
+        with tqdm(total=total_frames,
                 desc=os.path.basename(video_path)[:25].ljust(25),
                 bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [Kalan: {remaining}]") as pbar:
             
-            frame_idx = 0
             while cap.isOpened():
                 for _ in range(self.frame_skip-1):
                     if not cap.grab():
@@ -86,7 +101,7 @@ class EnhancedCustomerCounter:
                 if not ret:
                     break
 
-                results = self.model.track(frame, imgsz=self.frame_size, conf=0.6, classes=0, 
+                results = self.model.track(frame, imgsz=self.frame_size, conf=0.5, classes=0, 
                                          persist=True, tracker="bytetrack.yaml", verbose=False)
 
                 if results[0].boxes.id is not None:
@@ -103,7 +118,14 @@ class EnhancedCustomerCounter:
                                 video_count += 1
                                 self.counted_ids.add(track_id)
                             if self.show_gui:
-                                color = self.colors['counted'] if track_id in self.counted_ids else self.colors['uncounted']
+                                # Renk seçimi
+                                if track_id in self.invalid_ids:
+                                    color = self.colors['invalid']  # Mor
+                                elif track_id in self.counted_ids:
+                                    color = self.colors['counted']  # Yeşil
+                                else:
+                                    color = self.colors['uncounted']  # Kırmızı
+                                    
                                 cv2.rectangle(frame, (int(box[0]), int(box[1])), (int(box[2]), int(box[3])), color, 2)
                                 cv2.putText(frame, f"ID:{track_id}", (int(box[0]), int(box[1])-10), 
                                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
@@ -112,6 +134,10 @@ class EnhancedCustomerCounter:
                     cv2.rectangle(frame, (self.detection_roi['x'], self.detection_roi['y']),
                                 (self.detection_roi['x']+self.detection_roi['w'], 
                                  self.detection_roi['y']+self.detection_roi['h']), (0,255,0), 2)
+                    cv2.line(frame, 
+                            (self.detection_roi['x'], self.entry_line),
+                            (self.detection_roi['x'] + self.detection_roi['w'], self.entry_line),
+                            (255, 0, 0), 2)  # Entry line'ı mavi renkte göster
                     cv2.putText(frame, f"Toplam: {video_count}", (10, 30), 
                               cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
                     writer.write(frame)
@@ -120,7 +146,6 @@ class EnhancedCustomerCounter:
                         break
 
                 pbar.update(1)
-                frame_idx += 1
 
         cap.release()
         if writer:
@@ -170,7 +195,7 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
 
-    show_gui = False
+    show_gui = True
     frame_skip = 2
     
     counter = EnhancedCustomerCounter(
